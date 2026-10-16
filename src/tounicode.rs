@@ -5891,3 +5891,149 @@ endbfrange
         assert_eq!(enc.map.get(&65535), Some(&65535));
     }
 }
+
+/// Qualification of the 168 built-in CMaps (Kivadis, not from an upstream pull request).
+///
+/// Every embedded map must decode whole, its `usecmap` chain must resolve inside the embedded
+/// set, and a spread of its code points must read as the character an independent codec gives for
+/// the same code (`scripts/qualify_bcmaps.py`). Set `BCMAP_QUALIFICATION_SAMPLES` to a file path
+/// to write the sampled code points for that script.
+#[cfg(test)]
+mod bcmap_qualification {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+
+    /// How many code points of each map the script checks, spread evenly over the map.
+    const SAMPLES_PER_MAP: usize = 64;
+
+    fn embedded_maps() -> Vec<String> {
+        let mut names: Vec<String> = BUILTIN_CMAPS
+            .files()
+            .filter_map(|file| file.path().to_str())
+            .filter_map(|name| name.strip_suffix(".bcmap"))
+            .map(str::to_owned)
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The character collection a map belongs to, which names the UCS2 map that reads its CIDs.
+    fn collection(name: &str) -> &'static str {
+        if name.starts_with("Adobe-GB1") || name.starts_with("GB") || name.starts_with("UniGB") {
+            "GB1"
+        } else if name.starts_with("Adobe-CNS1")
+            || ["B5", "CNS", "ETen", "ETHK", "HK", "UniCNS"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        {
+            "CNS1"
+        } else if name.starts_with("Adobe-Korea1")
+            || name.starts_with("KSC")
+            || name.starts_with("UniKS")
+        {
+            "Korea1"
+        } else {
+            "Japan1"
+        }
+    }
+
+    /// Every code of a map with the CID it reads as, the `usecmap` base first and the map's own
+    /// entries over it, keyed by code length and code.
+    fn cid_entries(name: &str, depth: usize) -> BTreeMap<(usize, u32), u32> {
+        assert!(depth < 8, "{name}: usecmap chain too deep");
+        let data = read_builtin_cmap_file(&format!("{name}.bcmap")).expect("embedded map");
+        let decoded = decode_binary_cmap(data).unwrap_or_else(|err| panic!("{name}: {err}"));
+        let mut entries = match &decoded.use_cmap {
+            Some(base) => cid_entries(base, depth + 1),
+            None => BTreeMap::new(),
+        };
+        for record in decoded.records {
+            match record {
+                BcmapRecord::CidChar { size, code, cid } => {
+                    entries.insert((size, code), cid);
+                }
+                BcmapRecord::CidRange {
+                    size,
+                    start,
+                    end,
+                    cid,
+                } => {
+                    for (offset, code) in (start..=end).enumerate() {
+                        entries.insert((size, code), cid + offset as u32);
+                    }
+                }
+                _ => {}
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn all_168_embedded_cmaps_decode_whole_and_resolve_their_usecmap_chain() {
+        let names = embedded_maps();
+        assert_eq!(names.len(), 168, "the embedded set");
+        let set: std::collections::BTreeSet<&str> = names.iter().map(String::as_str).collect();
+        for name in &names {
+            let data = read_builtin_cmap_file(&format!("{name}.bcmap")).unwrap();
+            let decoded = decode_binary_cmap(data).unwrap_or_else(|err| panic!("{name}: {err}"));
+            assert!(
+                !decoded.records.is_empty() || decoded.use_cmap.is_some(),
+                "{name}: neither a record nor a usecmap"
+            );
+            if let Some(base) = &decoded.use_cmap {
+                assert!(set.contains(base.as_str()), "{name}: usecmap {base} absent");
+            }
+            if name.ends_with("-UCS2") && name.starts_with("Adobe-") {
+                continue;
+            }
+            let entries = cid_entries(name, 0);
+            assert!(!entries.is_empty(), "{name}: no CID mapping");
+            // The production reader agrees on every code of up to two bytes.
+            let production = load_builtin_encoding_cmap(name)
+                .unwrap_or_else(|| panic!("{name}: the encoding reader refused it"));
+            for (&(size, code), &cid) in &entries {
+                if size <= 2 {
+                    assert_eq!(
+                        production.map.get(&(code as u16)),
+                        Some(&(cid as u16)),
+                        "{name}: code {code:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sampled_code_points_for_the_independent_codec_check() {
+        let Some(path) = std::env::var_os("BCMAP_QUALIFICATION_SAMPLES") else {
+            return;
+        };
+        let mut lines = String::from("map\tsize\tcode\tcid\ttext\n");
+        for name in embedded_maps() {
+            if name.starts_with("Adobe-") && name.ends_with("-UCS2") {
+                continue;
+            }
+            let ucs2 = build_cmap_from_builtin_cmap(collection(&name)).expect("UCS2 map");
+            let entries: Vec<_> = cid_entries(&name, 0).into_iter().collect();
+            let step = (entries.len() / SAMPLES_PER_MAP).max(1);
+            let mut taken: Vec<_> = entries.iter().step_by(step).collect();
+            taken.extend(entries.last());
+            taken.dedup();
+            for &((size, code), cid) in taken {
+                let text = u16::try_from(cid)
+                    .ok()
+                    .and_then(|cid| ucs2.lookup(cid))
+                    .map(|text| {
+                        text.chars()
+                            .map(|c| format!("{:x}", c as u32))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                writeln!(lines, "{name}\t{size}\t{code:x}\t{cid}\t{text}").unwrap();
+            }
+        }
+        std::fs::write(path, lines).unwrap();
+    }
+}
