@@ -278,11 +278,15 @@ pub(crate) fn detect_from_document(
             }
             let is_image_dominated = analysis.image_count > 10
                 && analysis.image_count > analysis.text_operator_count * 3;
-            let effective_min_ops = if analysis.has_images || analysis.image_count > 0 {
-                config.min_text_ops_per_page.max(10)
-            } else {
-                config.min_text_ops_per_page
-            };
+            // The ten-operator floor for pages with images is the scan-with-chrome rule: one
+            // raster and a few native lines. A page that draws several images (a slide's
+            // background and decorations) is composed, not scanned, and keeps the plain floor.
+            let effective_min_ops =
+                if (analysis.has_images || analysis.image_count > 0) && analysis.image_count <= 1 {
+                    config.min_text_ops_per_page.max(10)
+                } else {
+                    config.min_text_ops_per_page
+                };
             if analysis.text_operator_count >= effective_min_ops
                 && !is_image_dominated
                 && analysis.unique_text_chars >= 5
@@ -457,7 +461,10 @@ pub(crate) fn detect_from_document(
                 // a scan with incidental chrome (masthead, stamp, date line)
                 // even when that chrome is diverse, decodable text — keep
                 // this in sync with `page_ocr_signals`.
+                // A scan is one raster: a page that draws several images (a background and
+                // decoration, as a slide does) is composed, not scanned.
                 let sparse_text_over_scan = analysis.has_template_image
+                    && analysis.image_count <= 1
                     && analysis.text_operator_count < config.min_text_ops_per_page.max(10);
                 if (analysis.has_template_image && looks_like_scan)
                     || analysis.has_vector_text
@@ -2254,8 +2261,9 @@ pub(crate) fn page_ocr_signals(doc: &Document, page_id: ObjectId) -> PageOcrSign
             && !(analysis.has_decodable_text_fonts && analysis.text_operator_count >= 10);
         let looks_like_scan =
             analysis.image_count <= 1 && analysis.text_operator_count < 50 && alphanum_low;
-        let insufficient_text =
-            analysis.text_operator_count < DetectionConfig::default().min_text_ops_per_page.max(10);
+        let insufficient_text = analysis.image_count <= 1
+            && analysis.text_operator_count
+                < DetectionConfig::default().min_text_ops_per_page.max(10);
         looks_like_scan || insufficient_text
     };
 
@@ -3645,6 +3653,118 @@ mod tests {
             needs_ocr,
             "template image + text below the pages_with_text floor is a scan"
         );
+    }
+
+    /// A slide-style page: a full-page background image and three small decorations, each drawn
+    /// directly by the page content, over `lines` visible text-show operators.
+    fn slide_page(lines: &[&str]) -> (Document, ObjectId) {
+        use lopdf::dictionary;
+        let mut doc = Document::with_version("1.4");
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        let mut xobjects = lopdf::Dictionary::new();
+        let mut content = Vec::new();
+        for (index, (width, height)) in [(1500, 2383), (600, 3), (300, 3), (200, 200)]
+            .into_iter()
+            .enumerate()
+        {
+            let image_id = doc.add_object(Object::Stream(lopdf::Stream::new(
+                dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => Object::Name(b"Image".to_vec()),
+                    "Width" => Object::Integer(width),
+                    "Height" => Object::Integer(height),
+                },
+                Vec::new(),
+            )));
+            xobjects.set(format!("Im{index}"), Object::Reference(image_id));
+            if index == 0 {
+                content.extend_from_slice(b"q 1500 0 0 2383 0 0 cm /Im0 Do Q ");
+            } else {
+                content.extend_from_slice(
+                    format!(
+                        "q {} 0 0 {} 100 {} cm /Im{index} Do Q ",
+                        width / 10,
+                        height,
+                        index * 400
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => Object::Name(b"Type1".to_vec()),
+            "BaseFont" => Object::Name(b"Helvetica".to_vec()),
+        });
+        content.extend_from_slice(b"BT /F1 12 Tf ");
+        for line in lines {
+            content.extend_from_slice(format!("({line}) Tj ").as_bytes());
+        }
+        content.extend_from_slice(b"ET");
+        let content_id =
+            doc.add_object(Object::Stream(lopdf::Stream::new(dictionary! {}, content)));
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Page",
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => vec![0.into(), 0.into(), 1500.into(), 2383.into()],
+                "Resources" => dictionary! {
+                    "Font" => dictionary! { "F1" => Object::Reference(font_id) },
+                    "XObject" => Object::Dictionary(xobjects),
+                },
+                "Contents" => Object::Reference(content_id),
+            }),
+        );
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        (doc, page_id)
+    }
+
+    #[test]
+    fn test_slide_with_background_and_decoration_images_stays_native() {
+        // Few text lines over a covering background image and three further images: the page
+        // is composed of several rasters, not one scan, so the sparse-text floor must not send
+        // it to OCR (a one-image page with the same text still goes, see the masthead test).
+        let (doc, page_id) = slide_page(&[
+            "Contents",
+            "1. Overview of the Pack",
+            "2. Introduction of Product Services and Key Features",
+            "3. Product Detail Specification",
+        ]);
+        let analysis = analyze_page_content(&doc, page_id);
+        assert!(
+            analysis.has_template_image,
+            "sanity: the background is a template image"
+        );
+        assert!(
+            analysis.has_covering_image,
+            "sanity: the images cover the page"
+        );
+        assert!(analysis.image_count > 1, "sanity: several images are drawn");
+        assert!(
+            analysis.text_operator_count < 10,
+            "sanity: the text is below the floor"
+        );
+        assert!(
+            !page_ocr_signals(&doc, page_id).template_image_needs_ocr,
+            "a page with several drawn images is not one scan"
+        );
+        let result = detect_from_document(&doc, 1, &DetectionConfig::default()).unwrap();
+        assert_eq!(result.pdf_type, PdfType::TextBased);
+        assert!(result.pages_needing_ocr.is_empty());
     }
 
     #[test]
