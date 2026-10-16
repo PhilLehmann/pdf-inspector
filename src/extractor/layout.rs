@@ -2959,6 +2959,13 @@ fn should_use_y_sorting(items: &[TextItem]) -> bool {
 /// `page_rtl` is the direction of the page the column belongs to, which
 /// settles how its lines with right-to-left letters read when their own
 /// letters do not (see `rtl_line_base`).
+/// Whether two runs read at right angles: their baselines differ by about a quarter turn, so
+/// neither sits on the other's line.
+fn reads_across(first: &TextItem, second: &TextItem) -> bool {
+    let turn = (first.rotation - second.rotation).rem_euclid(180.0);
+    (turn - 90.0).abs() <= 45.0
+}
+
 fn group_single_column(
     items: Vec<TextItem>,
     adaptive_threshold: f32,
@@ -2993,6 +3000,15 @@ fn group_single_column(
         // Only check the most recent line for merging
         let should_merge = lines.last().is_some_and(|last_line| {
             if last_line.page != item.page {
+                return false;
+            }
+            // A run that reads across the line (a margin stamp turned a quarter) shares a
+            // baseline coordinate with the body by accident, not by sitting on its line.
+            if last_line
+                .items
+                .iter()
+                .any(|existing| reads_across(existing, &item))
+            {
                 return false;
             }
             let y_diff = (last_line.y - item.line_y()).abs();
@@ -3548,6 +3564,37 @@ mod tests {
         ];
         let lines = group_single_column(items, 0.10, false);
         assert_eq!(lines.len(), 2, "independent column runs must not fuse");
+    }
+
+    #[test]
+    fn a_rotated_margin_stamp_on_the_body_baseline_is_its_own_line() {
+        // The stamp's box starts at the body line's y, so the two share a baseline coordinate
+        // while reading at right angles; it must not be glued to the body line (the arXiv
+        // stamp joined "...2023need to train ever larger models").
+        let mut stamp = make_item(1, 12.0, 232.0, "arXiv:2312.15166v2 [cs.CL] 29 Dec 2023");
+        stamp.rotation = 90.0;
+        let body = make_item(1, 70.9, 232.7, "need to train ever larger models");
+        let lines = group_single_column(vec![stamp.clone(), body.clone()], 0.10, false);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines
+            .iter()
+            .any(|line| line.items.len() == 1 && line.items[0].text.starts_with("arXiv")));
+        // Body runs on the same line still join, with the stamp in the way of neither.
+        let tail = make_item(1, 70.9 + body.width + 6.0, 232.7, "and more");
+        let lines = group_single_column(vec![stamp, body, tail], 0.10, false);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        // Quarter turns read across each other; half turns and equal angles do not.
+        let rotated = |rotation: f32| {
+            let mut item = make_item(1, 0.0, 0.0, "x");
+            item.rotation = rotation;
+            item
+        };
+        assert!(reads_across(&rotated(0.0), &rotated(90.0)));
+        assert!(reads_across(&rotated(0.0), &rotated(270.0)));
+        assert!(reads_across(&rotated(90.0), &rotated(0.0)));
+        assert!(!reads_across(&rotated(0.0), &rotated(180.0)));
+        assert!(!reads_across(&rotated(90.0), &rotated(270.0)));
+        assert!(!reads_across(&rotated(0.0), &rotated(10.0)));
     }
 
     #[test]
