@@ -1210,6 +1210,29 @@ fn detect_contents_list(items: &[(usize, &TextItem)]) -> Option<Table> {
         );
         return None;
     }
+    // Entries of a contents list are headings of the document: they start
+    // with a capital letter, a digit or a symbol. A column of lower-case words
+    // over a climbing number column ("kaolinite 10, illite 30, humus 200") is
+    // a data table whose numbers merely look like page numbers.
+    let lower_led = row_items
+        .iter()
+        .zip(&numbered)
+        .filter(|(row, n)| {
+            n.is_some()
+                && row
+                    .first()
+                    .and_then(|(_, item)| item.text.trim().chars().next())
+                    .is_some_and(char::is_lowercase)
+        })
+        .count();
+    if lower_led * 2 > raw_values.len() {
+        debug!(
+            "  contents list rejected: {} of {} entries start in lower case",
+            lower_led,
+            raw_values.len()
+        );
+        return None;
+    }
     // The page numbers share a right edge.
     right_edges.sort_by(|a, b| a.total_cmp(b));
     let median_edge = right_edges[right_edges.len() / 2];
@@ -2821,6 +2844,68 @@ mod tests {
         let indexed: Vec<(usize, &TextItem)> = marked.iter().enumerate().collect();
         let toc = detect_contents_list(&indexed).expect("dense contents list under a marked title");
         assert_eq!(toc.cells[0], vec!["Northern region office", "1"]);
+    }
+
+    #[test]
+    fn contents_list_leaves_a_table_of_lower_case_names_over_numbers_to_the_generic_path() {
+        // "Typical CEC of various soil colloids": a header row, a unit row, then
+        // lower-case names over numbers that climb like page numbers (10 to 200)
+        // on one right edge. It is a table, not a contents list.
+        let table = |names: &[&str]| -> Vec<TextItem> {
+            let mut items = vec![
+                contents_item("Mineral or colloid type", 68.0, 520.0, 110.0),
+                contents_item("CEC of pure colloid", 250.0, 520.0, 90.0),
+                contents_item("cmolc/kg", 300.0, 507.0, 40.0),
+            ];
+            for (r, (name, value)) in names
+                .iter()
+                .zip(["10", "30", "100", "150", "200"])
+                .enumerate()
+            {
+                let y = 494.0 - r as f32 * 13.0;
+                items.push(contents_item(name, 68.0, y, 100.0));
+                items.push(contents_item(value, 322.0, y, 18.0));
+            }
+            items
+        };
+        let lower = table(&[
+            "kaolinite",
+            "illite",
+            "montmorillonite",
+            "vermiculite",
+            "humus",
+        ]);
+        let indexed: Vec<(usize, &TextItem)> = lower.iter().enumerate().collect();
+        assert!(detect_contents_list(&indexed).is_none());
+        // The same numbers under capitalised titles are the contents list they look like.
+        let capitalised = table(&[
+            "Kaolinite",
+            "Illite",
+            "Montmorillonite",
+            "Vermiculite",
+            "Humus",
+        ]);
+        let indexed: Vec<(usize, &TextItem)> = capitalised.iter().enumerate().collect();
+        assert!(detect_contents_list(&indexed).is_some());
+        // Half of the titles in lower case is still a contents list; more than half is not.
+        let mixed = table(&[
+            "Kaolinite",
+            "Illite",
+            "Montmorillonite",
+            "vermiculite",
+            "humus",
+        ]);
+        let indexed: Vec<(usize, &TextItem)> = mixed.iter().enumerate().collect();
+        assert!(detect_contents_list(&indexed).is_some());
+        let mostly = table(&[
+            "kaolinite",
+            "illite",
+            "Montmorillonite",
+            "vermiculite",
+            "humus",
+        ]);
+        let indexed: Vec<(usize, &TextItem)> = mostly.iter().enumerate().collect();
+        assert!(detect_contents_list(&indexed).is_none());
     }
 
     #[test]
