@@ -10,6 +10,7 @@
 //! CropBox can need the shift.
 
 use lopdf::{Document, Object, ObjectId};
+use std::collections::HashSet;
 
 use super::geometry::PageRotation;
 use crate::types::{PdfLine, PdfRect, TextItem};
@@ -147,14 +148,23 @@ pub fn visible_page_box(doc: &Document, page_id: ObjectId) -> Option<PageBox> {
 /// Read an inheritable rectangle attribute, walking `/Parent` links. The
 /// outer `None` means no dictionary of the chain carries the key; the first
 /// one that does decides, and `Some(None)` is a present entry that is not a
-/// usable rectangle (wrong operand count, no area, not finite).
+/// usable rectangle (a direct `null`, wrong operand count, no area, not
+/// finite). An indirect entry is resolved first, and a reference to a missing
+/// object counts as absent, so the walk goes on to the parent, as PDFium and
+/// ISO 32000-1 7.3.10 have it. The chain is followed until it ends or repeats,
+/// with no depth limit, like PDFium.
 fn find_inherited_box(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<Option<PageBox>> {
     let mut id = page_id;
-    for _ in 0..32 {
+    let mut visited = HashSet::new();
+    while visited.insert(id) {
         let dict = doc.get_dictionary(id).ok()?;
         if let Ok(obj) = dict.get(key) {
-            if !matches!(obj, Object::Null) {
-                return Some(box_from_object(doc, obj));
+            let resolved = match obj {
+                Object::Reference(reference) => doc.get_object(*reference).ok(),
+                direct => Some(direct),
+            };
+            if let Some(resolved) = resolved {
+                return Some(box_from_array(doc, resolved));
             }
         }
         match dict.get(b"Parent") {
@@ -165,17 +175,12 @@ fn find_inherited_box(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<O
     None
 }
 
-/// The rectangle an entry denotes, as a renderer reads it: an array (direct
-/// or indirect) of exactly four operands, indirect operands resolved, a
+/// The rectangle an already resolved entry denotes, as a renderer reads it:
+/// an array of exactly four operands, indirect operands resolved, a
 /// non-number as zero, corners normalized.
-fn box_from_object(doc: &Document, obj: &Object) -> Option<PageBox> {
-    let array = match obj {
-        Object::Array(array) => array,
-        Object::Reference(reference) => match doc.get_object(*reference) {
-            Ok(Object::Array(array)) => array,
-            _ => return None,
-        },
-        _ => return None,
+fn box_from_array(doc: &Document, obj: &Object) -> Option<PageBox> {
+    let Object::Array(array) = obj else {
+        return None;
     };
     if array.len() != 4 {
         return None;
@@ -478,6 +483,99 @@ mod tests {
             crate::page_boxes_mem(&buffer).expect("page boxes"),
             vec![page_box(0.0, 0.0, 595.0, 842.0)]
         );
+    }
+
+    #[test]
+    fn a_reference_to_a_missing_object_is_absent_and_the_walk_goes_on() {
+        let (mut doc, page_id) = doc_with_boxes(
+            &[("MediaBox", [0, 0, 400, 500])],
+            &[("CropBox", [10, 10, 300, 400])],
+        );
+        let page = doc.get_dictionary_mut(page_id).unwrap();
+        page.set("CropBox", Object::Reference((9999, 0)));
+        assert_eq!(
+            visible_page_box(&doc, page_id),
+            Some(page_box(10.0, 10.0, 300.0, 400.0))
+        );
+        // The same for the MediaBox: the inherited one stands.
+        let (mut doc, page_id) = doc_with_boxes(&[], &[("MediaBox", [0, 0, 595, 842])]);
+        let page = doc.get_dictionary_mut(page_id).unwrap();
+        page.set("MediaBox", Object::Reference((9999, 0)));
+        assert_eq!(
+            visible_page_box(&doc, page_id),
+            Some(page_box(0.0, 0.0, 595.0, 842.0))
+        );
+    }
+
+    #[test]
+    fn a_null_entry_is_present_and_empty() {
+        let (mut doc, page_id) = doc_with_boxes(
+            &[("MediaBox", [0, 0, 400, 500])],
+            &[("CropBox", [10, 10, 300, 400])],
+        );
+        let page = doc.get_dictionary_mut(page_id).unwrap();
+        page.set("CropBox", Object::Null);
+        assert_eq!(
+            visible_page_box(&doc, page_id),
+            Some(page_box(0.0, 0.0, 400.0, 500.0))
+        );
+        // An indirect entry that resolves to null is present too.
+        let null_id = doc.add_object(Object::Null);
+        let page = doc.get_dictionary_mut(page_id).unwrap();
+        page.set("CropBox", Object::Reference(null_id));
+        assert_eq!(
+            visible_page_box(&doc, page_id),
+            Some(page_box(0.0, 0.0, 400.0, 500.0))
+        );
+    }
+
+    #[test]
+    fn the_parent_chain_has_no_depth_limit_and_stops_at_a_repeat() {
+        use lopdf::dictionary;
+        // 300 nested /Pages nodes with the MediaBox only on the root.
+        let mut doc = Document::with_version("1.5");
+        let ids: Vec<ObjectId> = (0..301).map(|_| doc.new_object_id()).collect();
+        for level in 0..300 {
+            let mut node = dictionary! {
+                "Type" => "Pages",
+                "Count" => 1,
+                "Kids" => vec![Object::Reference(ids[level + 1])],
+            };
+            if level > 0 {
+                node.set("Parent", Object::Reference(ids[level - 1]));
+            }
+            if level == 0 {
+                node.set("MediaBox", boxed([0, 0, 300, 300]));
+            }
+            doc.objects.insert(ids[level], node.into());
+        }
+        let page_id = ids[300];
+        doc.objects.insert(
+            page_id,
+            dictionary! { "Type" => "Page", "Parent" => Object::Reference(ids[299]) }.into(),
+        );
+        assert_eq!(
+            visible_page_box(&doc, page_id),
+            Some(page_box(0.0, 0.0, 300.0, 300.0))
+        );
+        // The page tree is real: the document enumerates the page and the accessor reports it.
+        let root = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(ids[0]),
+        });
+        doc.trailer.set("Root", Object::Reference(root));
+        let mut buffer = Vec::new();
+        doc.save_to(&mut buffer).expect("serialize");
+        assert_eq!(
+            crate::page_boxes_mem(&buffer).expect("page boxes"),
+            vec![page_box(0.0, 0.0, 300.0, 300.0)]
+        );
+        // A /Parent loop ends the walk.
+        let a = doc.new_object_id();
+        let b = doc.add_object(dictionary! { "Parent" => Object::Reference(a) });
+        doc.objects
+            .insert(a, dictionary! { "Parent" => Object::Reference(b) }.into());
+        assert_eq!(visible_page_box(&doc, a), None);
     }
 
     #[test]
