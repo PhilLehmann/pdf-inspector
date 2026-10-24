@@ -1532,6 +1532,31 @@ pub enum TableKind {
     Toc,
 }
 
+/// How a table's header row was established.
+///
+/// A synthesized row is never presented as a declared one: a consumer that
+/// repeats header rows across page segments must be able to tell the
+/// document's own `/TH` or `/THead` claim from a geometry recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableHeaderSource {
+    /// The document's tagged structure declares the row a header: a `/TH`
+    /// cell, or a cell of a row inside a `/THead` element.
+    Tagged,
+    /// The row was recovered from text above a tagged table whose first row
+    /// carries no header cell (`recover_unclaimed_header_row`). It is
+    /// evidence about the page, not a declaration by the document.
+    Synthesized,
+}
+
+/// One header row of a [`Table`], with the source of its header role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableHeaderRow {
+    /// Index into [`Table::cells`] (0 is the first row the formatter sees).
+    pub row: usize,
+    /// Whether the document declared the row or geometry recovered it.
+    pub source: TableHeaderSource,
+}
+
 /// A detected table.
 #[derive(Debug, Clone)]
 pub struct Table {
@@ -1545,10 +1570,20 @@ pub struct Table {
     pub item_indices: Vec<usize>,
     /// Data table vs TOC. Set by `Table::new` from `cells`.
     pub kind: TableKind,
+    /// Header rows in ascending row order, each with its source. Empty when
+    /// the document's tagged structure declares no header and no row was
+    /// recovered from geometry; this is the only representation of "no
+    /// header" — row 0 is never assumed to be one.
+    pub header_rows: Vec<TableHeaderRow>,
 }
 
 impl Table {
     /// Build a table and classify it (data vs TOC) from its cells.
+    ///
+    /// The new table has no header rows: [`TableHeaderSource::Tagged`] rows
+    /// are added by the structure-tree detector, and
+    /// [`TableHeaderSource::Synthesized`] rows by its recovery step. A table
+    /// built from geometry alone therefore reports no header at all.
     pub fn new(
         columns: Vec<f32>,
         rows: Vec<f32>,
@@ -1566,8 +1601,18 @@ impl Table {
             cells,
             item_indices,
             kind,
+            header_rows: Vec::new(),
         }
     }
+}
+
+/// A table detected on one page of a document.
+#[derive(Debug, Clone)]
+pub struct PageTable {
+    /// 1-indexed page number the table appears on.
+    pub page: u32,
+    /// The table, including [`Table::header_rows`].
+    pub table: Table,
 }
 
 #[cfg(test)]
@@ -1728,6 +1773,7 @@ mod tests {
             ],
             item_indices: vec![],
             kind: TableKind::Data,
+            header_rows: Vec::new(),
         };
 
         let md = table_to_markdown(&table);
@@ -2510,6 +2556,7 @@ mod tests {
             ],
             item_indices: vec![],
             kind: TableKind::Data,
+            header_rows: Vec::new(),
         };
 
         let md = table_to_markdown(&table);

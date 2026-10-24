@@ -853,6 +853,10 @@ struct TableDetectionOutput {
     pages_with_detected_tables: HashSet<u32>,
     pages_with_tables: HashSet<u32>,
     markdown_by_page: HashMap<u32, Vec<PositionedMarkdown>>,
+    /// Every table recorded on the page, in detection order, whether it came
+    /// from the structure tree or from geometry. Kept in the Markdown mode
+    /// too so callers can see the header rows of the tables they render.
+    tables: Vec<(u32, crate::tables::Table)>,
     #[cfg(feature = "ocr")]
     complete_tables: Vec<(u32, crate::tables::Table)>,
 }
@@ -864,6 +868,7 @@ impl TableDetectionOutput {
             pages_with_detected_tables: HashSet::new(),
             pages_with_tables: HashSet::new(),
             markdown_by_page: HashMap::new(),
+            tables: Vec::new(),
             #[cfg(feature = "ocr")]
             complete_tables: Vec::new(),
         }
@@ -876,6 +881,7 @@ impl TableDetectionOutput {
         chart_order: Option<ChartProseOrder>,
     ) {
         self.pages_with_detected_tables.insert(page);
+        self.tables.push((page, table.clone()));
         match self.mode {
             TableOutputMode::Markdown => {
                 self.pages_with_tables.insert(page);
@@ -911,6 +917,9 @@ impl TableDetectionOutput {
 #[derive(Default)]
 struct MarkdownConversionOutput {
     markdown: String,
+    /// Every table the conversion recorded, by 1-indexed page, in detection
+    /// order. The entries carry [`crate::tables::Table::header_rows`].
+    tables: Vec<(u32, crate::tables::Table)>,
     #[cfg(feature = "ocr")]
     detected_tables: Vec<(u32, crate::tables::Table)>,
 }
@@ -1470,6 +1479,31 @@ pub(crate) fn to_markdown_from_items_with_rects_and_lines(
         TableOutputMode::Markdown,
     )
     .markdown
+}
+
+/// Run the Markdown table pipeline and return the Markdown together with
+/// every table the conversion recorded, each tagged with its 1-indexed page.
+///
+/// The Markdown is byte-identical to
+/// [`to_markdown_from_items_with_rects_and_lines`]; the tables are the same
+/// objects that were rendered into it, carrying
+/// [`crate::tables::Table::header_rows`] (tagged and synthesized rows).
+pub(crate) fn to_markdown_and_tables_from_items_with_rects_and_lines(
+    items: Vec<TextItem>,
+    options: MarkdownOptions,
+    rects: &[crate::types::PdfRect],
+    pdf_lines: &[crate::types::PdfLine],
+    context: MarkdownDocumentContext<'_>,
+) -> (String, Vec<(u32, crate::tables::Table)>) {
+    let conversion = convert_items_with_rects_lines_and_table_output(
+        items,
+        options,
+        rects,
+        pdf_lines,
+        context,
+        TableOutputMode::Markdown,
+    );
+    (conversion.markdown, conversion.tables)
 }
 
 /// Run the ordinary Markdown table pipeline but return only structurally
@@ -2136,6 +2170,8 @@ fn convert_items_with_rects_lines_and_table_output(
     let mut detected_tables = table_output.complete_tables;
     #[cfg(feature = "ocr")]
     detected_tables.sort_by_key(|(page, _)| *page);
+    let mut tables = table_output.tables;
+    tables.sort_by_key(|(page, _)| *page);
     let mut page_tables = table_output.markdown_by_page;
 
     // Images are also removed before line grouping, so give them the same
@@ -2406,6 +2442,7 @@ fn convert_items_with_rects_lines_and_table_output(
     );
     MarkdownConversionOutput {
         markdown,
+        tables,
         #[cfg(feature = "ocr")]
         detected_tables,
     }
@@ -2590,6 +2627,7 @@ mod tests {
             cells: vec![],
             item_indices: (0..detection_items.len()).collect(),
             kind: crate::tables::TableKind::Data,
+            header_rows: Vec::new(),
         };
 
         // Footer-only candidate: every item is furniture -> vetoed.

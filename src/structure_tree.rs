@@ -446,7 +446,7 @@ fn collect_tables(
     for elem in elements {
         if elem.role == StructRole::Table {
             let mut rows = Vec::new();
-            collect_rows(&elem.children, obj_to_page, &mut rows);
+            collect_rows(&elem.children, obj_to_page, &mut rows, false);
             if rows.len() >= 2 && rows.iter().any(|r| !r.cells.is_empty()) {
                 tables.push(StructTable { rows });
             }
@@ -458,10 +458,16 @@ fn collect_tables(
 
 /// Collect rows from Table children, transparently descending through
 /// THead/TBody/TFoot grouping elements.
+///
+/// A cell of a row inside `/THead` is a header cell even when the cell itself
+/// is a `/TD`: ISO 32000-1 lets a table declare its header by the grouping
+/// element alone. `/TBody` and `/TFoot` return to the ordinary rule, where
+/// only a `/TH` cell is a header.
 fn collect_rows(
     elements: &[StructElement],
     obj_to_page: &HashMap<ObjectId, u32>,
     rows: &mut Vec<StructTableRow>,
+    in_thead: bool,
 ) {
     for elem in elements {
         match elem.role {
@@ -469,7 +475,7 @@ fn collect_rows(
                 let mut cells = Vec::new();
                 for child in &elem.children {
                     if child.role == StructRole::TD || child.role == StructRole::TH {
-                        let is_header = child.role == StructRole::TH;
+                        let is_header = in_thead || child.role == StructRole::TH;
                         let mut mcids = Vec::new();
                         collect_mcids_recursive(child, obj_to_page, &mut mcids);
                         cells.push(StructTableCell { is_header, mcids });
@@ -477,8 +483,11 @@ fn collect_rows(
                 }
                 rows.push(StructTableRow { cells });
             }
-            StructRole::THead | StructRole::TBody | StructRole::TFoot => {
-                collect_rows(&elem.children, obj_to_page, rows);
+            StructRole::THead => {
+                collect_rows(&elem.children, obj_to_page, rows, true);
+            }
+            StructRole::TBody | StructRole::TFoot => {
+                collect_rows(&elem.children, obj_to_page, rows, false);
             }
             _ => {}
         }
@@ -1480,6 +1489,68 @@ mod tests {
         };
 
         assert_eq!(tree.mcid_count(), 3);
+    }
+
+    #[test]
+    fn thead_grouping_marks_its_rows_as_header_cells() {
+        // `/THead` declares the header by grouping alone: its `/TD` cells
+        // must reach the table model as header cells. A `/TBody` row returns
+        // to the ordinary rule, where only `/TH` is a header.
+        let page = (1u32, 0u16);
+        let cell = |role: StructRole, mcid: i64| StructElement {
+            role,
+            alt_text: None,
+            actual_text: None,
+            lang: None,
+            content_refs: vec![MarkedContentRef {
+                mcid,
+                page_id: Some(page),
+            }],
+            children: Vec::new(),
+        };
+        let row = |roles: &[StructRole], base: i64| StructElement {
+            role: StructRole::TR,
+            alt_text: None,
+            actual_text: None,
+            lang: None,
+            content_refs: Vec::new(),
+            children: roles
+                .iter()
+                .enumerate()
+                .map(|(index, role)| cell(role.clone(), base + index as i64))
+                .collect(),
+        };
+        let group = |role: StructRole, children: Vec<StructElement>| StructElement {
+            role,
+            alt_text: None,
+            actual_text: None,
+            lang: None,
+            content_refs: Vec::new(),
+            children,
+        };
+        let table = group(
+            StructRole::Table,
+            vec![
+                group(
+                    StructRole::THead,
+                    vec![row(&[StructRole::TD, StructRole::TD], 0)],
+                ),
+                group(
+                    StructRole::TBody,
+                    vec![row(&[StructRole::TD, StructRole::TD], 2)],
+                ),
+            ],
+        );
+
+        let obj_to_page: HashMap<ObjectId, u32> = std::iter::once((page, 1u32)).collect();
+        let mut tables = Vec::new();
+        collect_tables(&[table], &obj_to_page, &mut tables);
+
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].rows.len(), 2);
+        assert!(tables[0].rows[0].cells.iter().all(|cell| cell.is_header));
+        assert!(tables[0].rows[1].cells.iter().all(|cell| !cell.is_header));
+        assert_eq!(tables[0].rows[0].cells[0].mcids, vec![(0, 1)]);
     }
 
     #[test]

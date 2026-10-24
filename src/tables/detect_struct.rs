@@ -11,7 +11,7 @@ use log::debug;
 use crate::structure_tree::{StructTable, StructTableRow};
 use crate::types::TextItem;
 
-use super::Table;
+use super::{Table, TableHeaderRow, TableHeaderSource};
 
 #[derive(Debug, Clone)]
 struct MatchedCell {
@@ -524,6 +524,17 @@ pub fn detect_tables_from_struct_tree(
         let has_ragged_rows = raw_rows
             .iter()
             .any(|row| row.iter().filter(|cell| cell.x.is_some()).count() < num_cols);
+        // Rows the document itself declares as header rows. A row is a header
+        // row when any of its cells is a `/TH` or sits inside a `/THead`
+        // (both arrive here as `StructTableCell::is_header`). The indices are
+        // into `raw_rows`, which is built one row per `page_rows` entry, so
+        // they are the row indices of both candidate tables below.
+        let tagged_header_rows: Vec<usize> = page_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.cells.iter().any(|cell| cell.is_header))
+            .map(|(index, _)| index)
+            .collect();
         let first_row_has_tagged_header = page_rows.first().is_some_and(|row| {
             let header_cells = row.cells.iter().filter(|cell| cell.is_header).count();
             header_cells * 2 >= row.cells.len()
@@ -561,15 +572,37 @@ pub fn detect_tables_from_struct_tree(
             has_ragged_rows && !first_row_has_tagged_header,
         );
 
-        let recovered_header = aligned_table.item_indices.len() > item_count_before_header
-            || aligned_table.cells.len() > row_count_before_header;
-        let prefer_aligned = recovered_header;
+        let synthesized_header = aligned_table.cells.len() > row_count_before_header;
+        let recovered_header =
+            aligned_table.item_indices.len() > item_count_before_header || synthesized_header;
 
-        tables.push(if prefer_aligned {
+        let mut chosen = if recovered_header {
             aligned_table
         } else {
             legacy_table
-        });
+        };
+        // The recovered row is prepended at index 0 and is always the
+        // synthesized one; every tagged row keeps its order below it. A
+        // consumer can therefore tell the document's declaration from the
+        // geometry recovery by `source`, not by position.
+        let shift = usize::from(synthesized_header);
+        chosen.header_rows = tagged_header_rows
+            .into_iter()
+            .map(|row| TableHeaderRow {
+                row: row + shift,
+                source: TableHeaderSource::Tagged,
+            })
+            .collect();
+        if synthesized_header {
+            chosen.header_rows.insert(
+                0,
+                TableHeaderRow {
+                    row: 0,
+                    source: TableHeaderSource::Synthesized,
+                },
+            );
+        }
+        tables.push(chosen);
     }
 
     tables
@@ -864,6 +897,15 @@ mod tests {
         assert_eq!(table.columns.len(), 4);
         assert!(table.columns.windows(2).all(|w| w[0] < w[1]));
         assert_eq!(table.item_indices.len(), items.len());
+        // The header row is synthesized from the text above the table, not
+        // declared by the document, and must say so.
+        assert_eq!(
+            table.header_rows,
+            vec![TableHeaderRow {
+                row: 0,
+                source: TableHeaderSource::Synthesized,
+            }]
+        );
     }
 
     #[test]
@@ -1045,6 +1087,159 @@ mod tests {
         assert!(!table.item_indices.contains(&0));
         assert!(!table.item_indices.contains(&1));
         assert!(!table.item_indices.contains(&2));
+        assert_eq!(
+            table.header_rows,
+            vec![TableHeaderRow {
+                row: 0,
+                source: TableHeaderSource::Tagged,
+            }]
+        );
+    }
+
+    #[test]
+    fn tagged_header_row_after_a_title_keeps_its_index() {
+        // Row 0 is an ordinary title row; the document declares row 1 as the
+        // header. Nothing is recovered from above, so the reported header
+        // index must be 1 — never row 0.
+        let items = vec![
+            make_item("Report title", 50.0, 700.0, 1, Some(10)),
+            make_item("on two lines", 200.0, 700.0, 1, Some(11)),
+            make_item("continued", 350.0, 700.0, 1, Some(12)),
+            make_item("Name", 50.0, 680.0, 1, Some(20)),
+            make_item("Age", 200.0, 680.0, 1, Some(21)),
+            make_item("City", 350.0, 680.0, 1, Some(22)),
+            make_item("Alice", 50.0, 660.0, 1, Some(30)),
+            make_item("30", 200.0, 660.0, 1, Some(31)),
+            make_item("Berlin", 350.0, 660.0, 1, Some(32)),
+        ];
+        let struct_tables = vec![StructTable {
+            rows: vec![
+                StructTableRow {
+                    cells: vec![
+                        StructTableCell {
+                            is_header: false,
+                            mcids: vec![(10, 1)],
+                        },
+                        StructTableCell {
+                            is_header: false,
+                            mcids: vec![(11, 1)],
+                        },
+                        StructTableCell {
+                            is_header: false,
+                            mcids: vec![(12, 1)],
+                        },
+                    ],
+                },
+                StructTableRow {
+                    cells: vec![
+                        StructTableCell {
+                            is_header: true,
+                            mcids: vec![(20, 1)],
+                        },
+                        StructTableCell {
+                            is_header: true,
+                            mcids: vec![(21, 1)],
+                        },
+                        StructTableCell {
+                            is_header: true,
+                            mcids: vec![(22, 1)],
+                        },
+                    ],
+                },
+                StructTableRow {
+                    cells: vec![
+                        StructTableCell {
+                            is_header: false,
+                            mcids: vec![(30, 1)],
+                        },
+                        StructTableCell {
+                            is_header: false,
+                            mcids: vec![(31, 1)],
+                        },
+                        StructTableCell {
+                            is_header: false,
+                            mcids: vec![(32, 1)],
+                        },
+                    ],
+                },
+            ],
+        }];
+
+        let tables = detect_tables_from_struct_tree(&items, &struct_tables, 1);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(
+            tables[0].header_rows,
+            vec![TableHeaderRow {
+                row: 1,
+                source: TableHeaderSource::Tagged,
+            }]
+        );
+    }
+
+    #[test]
+    fn every_tagged_header_row_is_reported() {
+        let items = vec![
+            make_item("Name", 50.0, 700.0, 1, Some(10)),
+            make_item("Age", 200.0, 700.0, 1, Some(11)),
+            make_item("Unit", 350.0, 700.0, 1, Some(12)),
+            make_item("Code", 50.0, 680.0, 1, Some(20)),
+            make_item("Count", 200.0, 680.0, 1, Some(21)),
+            make_item("Kind", 350.0, 680.0, 1, Some(22)),
+            make_item("Alice", 50.0, 660.0, 1, Some(30)),
+            make_item("30", 200.0, 660.0, 1, Some(31)),
+            make_item("Person", 350.0, 660.0, 1, Some(32)),
+        ];
+        let header_row = |mcids: [i64; 3]| StructTableRow {
+            cells: mcids
+                .iter()
+                .map(|&mcid| StructTableCell {
+                    is_header: true,
+                    mcids: vec![(mcid, 1)],
+                })
+                .collect(),
+        };
+        let data_row = StructTableRow {
+            cells: vec![30, 31, 32]
+                .into_iter()
+                .map(|mcid| StructTableCell {
+                    is_header: false,
+                    mcids: vec![(mcid, 1)],
+                })
+                .collect(),
+        };
+        let struct_tables = vec![StructTable {
+            rows: vec![header_row([10, 11, 12]), header_row([20, 21, 22]), data_row],
+        }];
+
+        let tables = detect_tables_from_struct_tree(&items, &struct_tables, 1);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(
+            tables[0].header_rows,
+            vec![
+                TableHeaderRow {
+                    row: 0,
+                    source: TableHeaderSource::Tagged,
+                },
+                TableHeaderRow {
+                    row: 1,
+                    source: TableHeaderSource::Tagged,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_geometry_only_table_has_no_header_rows() {
+        // No structure tree: the heuristic builder must not invent a header,
+        // not even row 0. This is the untagged path.
+        let mut grid: Vec<TextItem> = Vec::new();
+        for (r, y) in [700.0, 680.0, 660.0, 640.0, 620.0].into_iter().enumerate() {
+            for (c, x) in [60.0, 180.0, 300.0, 420.0].into_iter().enumerate() {
+                grid.push(make_item(&format!("{}{}", r + 1, c + 1), x, y, 1, None));
+            }
+        }
+        let table = crate::tables::try_build_table_from_columns(&grid, 1).expect("grid is a table");
+        assert!(table.header_rows.is_empty(), "{:?}", table.header_rows);
     }
 
     #[test]

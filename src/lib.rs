@@ -232,6 +232,13 @@ pub struct PdfProcessResult {
     /// empty in [`ProcessMode::DetectOnly`], which decodes no text;
     /// otherwise empty when every such code had an entry.
     pub cmap_gaps: Vec<FontCMapGaps>,
+    /// The tables detected on every page, in page order, each carrying the
+    /// header rows the document's tagged structure declares (`/TH`, `/THead`)
+    /// and marking a row recovered from geometry as synthesized. Empty in
+    /// [`ProcessMode::DetectOnly`] and when no Markdown was produced (the
+    /// table pipeline runs with the Markdown conversion). See
+    /// [`tables::Table::header_rows`] and [`tables::TableHeaderSource`].
+    pub tables: Vec<tables::PageTable>,
 }
 
 // =========================================================================
@@ -4616,6 +4623,7 @@ fn process_document(
             layout: LayoutComplexity::default(),
             has_encoding_issues: false,
             cmap_gaps: Vec::new(),
+            tables: Vec::new(),
         });
     }
 
@@ -4640,6 +4648,7 @@ fn process_document(
             layout: LayoutComplexity::default(),
             has_encoding_issues: false,
             cmap_gaps: Vec::new(),
+            tables: Vec::new(),
         });
     }
 
@@ -4727,6 +4736,7 @@ fn process_document(
         text_quality_pages,
         text_quality_reasons_by_page,
         cmap_gaps,
+        detected_tables,
     ) = match extracted {
         Some((
             (items, rects, lines),
@@ -4839,24 +4849,26 @@ fn process_document(
                 &chart_regions,
             );
 
-            let md = if options.mode == ProcessMode::Analyze {
-                None
+            let (md, detected_tables) = if options.mode == ProcessMode::Analyze {
+                (None, Vec::new())
             } else {
-                Some(markdown::to_markdown_from_items_with_rects_and_lines(
-                    items,
-                    options.markdown,
-                    &rects,
-                    &lines,
-                    markdown::MarkdownDocumentContext {
-                        page_thresholds: &page_thresholds,
-                        struct_roles: struct_roles.as_ref(),
-                        struct_tables: &struct_tables,
-                        page_count,
-                        prefiltered_page_number_pages: Some(&removed_pages),
-                        prefiltered_page_number_mask: Some(removal_mask.as_slice()),
-                        precomputed_chart_regions: Some(&chart_regions),
-                    },
-                ))
+                let (markdown, detected_tables) =
+                    markdown::to_markdown_and_tables_from_items_with_rects_and_lines(
+                        items,
+                        options.markdown,
+                        &rects,
+                        &lines,
+                        markdown::MarkdownDocumentContext {
+                            page_thresholds: &page_thresholds,
+                            struct_roles: struct_roles.as_ref(),
+                            struct_tables: &struct_tables,
+                            page_count,
+                            prefiltered_page_number_pages: Some(&removed_pages),
+                            prefiltered_page_number_mask: Some(removal_mask.as_slice()),
+                            precomputed_chart_regions: Some(&chart_regions),
+                        },
+                    );
+                (Some(markdown), detected_tables)
             };
 
             // A code no CMap could read is an encoding issue whether or not
@@ -4875,6 +4887,7 @@ fn process_document(
                 text_quality.pages_needing_ocr,
                 ocr_reasons_by_page,
                 font_cmap_gaps(cmap_coverage),
+                detected_tables,
             )
         }
         None => (
@@ -4884,6 +4897,7 @@ fn process_document(
             std::collections::HashSet::new(),
             Vec::new(),
             BTreeMap::new(),
+            Vec::new(),
             Vec::new(),
         ),
     };
@@ -4971,6 +4985,18 @@ fn process_document(
         markdown
     };
 
+    // The tables were read out of the Markdown conversion: when the text is
+    // not trustworthy enough to publish as Markdown (garbage downgrade, all
+    // gid-encoded fonts), its table claims are not trustworthy either.
+    let tables = if markdown.is_some() {
+        detected_tables
+            .into_iter()
+            .map(|(page, table)| tables::PageTable { page, table })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(PdfProcessResult {
         pdf_type,
         markdown,
@@ -4997,6 +5023,7 @@ fn process_document(
         layout,
         has_encoding_issues,
         cmap_gaps,
+        tables,
     })
 }
 
