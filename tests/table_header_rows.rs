@@ -174,22 +174,15 @@ fn build_pdf(tags: TableTags) -> Vec<u8> {
                     kid
                 };
                 cells_for_row.push(Object::Reference(add_struct_elem(
-                    &mut doc,
-                    role,
-                    kids,
-                    page_id,
+                    &mut doc, role, kids, page_id,
                 )));
             }
             rows.push(add_struct_elem(&mut doc, "TR", cells_for_row, page_id));
         }
 
         let kids: Vec<Object> = if tags == TableTags::THead {
-            let thead = add_struct_elem(
-                &mut doc,
-                "THead",
-                vec![Object::Reference(rows[0])],
-                page_id,
-            );
+            let thead =
+                add_struct_elem(&mut doc, "THead", vec![Object::Reference(rows[0])], page_id);
             vec![
                 Object::Reference(thead),
                 Object::Reference(rows[1]),
