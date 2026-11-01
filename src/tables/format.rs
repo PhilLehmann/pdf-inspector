@@ -351,6 +351,7 @@ struct CleanedCells {
 }
 
 /// Clean up table cells: merge continuation rows, extract footnotes, remove empty rows
+#[cfg(any(test, feature = "ocr"))]
 fn clean_table_cells(cells: &[Vec<String>]) -> (Vec<Vec<String>>, Vec<String>) {
     let cleaned = clean_table_cells_with_rows(cells);
     (cleaned.cells, cleaned.footnotes)
