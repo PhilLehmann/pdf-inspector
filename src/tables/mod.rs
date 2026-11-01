@@ -2027,7 +2027,8 @@ mod tests {
         let table = try_build_key_value_table_from_rows(&items, 1).unwrap();
         let md = table_to_markdown(&table);
 
-        assert!(md.starts_with("|Title/Description|Instances|"), "{md}");
+        assert!(md.starts_with("| | |\n|---|---|\n"), "{md}");
+        assert!(md.contains("|Title/Description|Instances|"), "{md}");
         assert!(
             md.contains(
                 "|Grand Rapids Remembers Gerald R. Ford issue. Grand Rapids Magazine, September 1987, p. 65.|Box 7|"

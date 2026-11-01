@@ -54,7 +54,7 @@ pub fn table_to_markdown(table: &Table) -> String {
     match header_row {
         None => {
             // No row is a header: an empty GFM header claims no cell as one.
-            let empty_header = vec![String::new(); num_cols];
+            let empty_header = vec![" ".to_string(); num_cols];
             push_row(&mut output, &empty_header);
             push_delimiter(&mut output, num_cols);
             for row in cleaned_cells {
