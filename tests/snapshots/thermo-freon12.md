@@ -32,8 +32,9 @@ kilograms per cubic meter
 
 ##### Physical Properties
 
-|Chemical Formula|CCl₂F₂|
+| | |
 |---|---|
+|Chemical Formula|CCl₂F₂|
 |Molecular mass|120.91|
 |Boiling Point At one atmosphere|-29.75°C|
 |Critical Temperature|111.97°C|
@@ -47,12 +48,14 @@ l
 
 **Freon<sup>®</sup>12 Saturation Properties-Temperature Table**
 
-|Temp|Pressure||Volume||Density||Enthalpy|||Entropy|Temp|
+| | | | | | | | | | | | |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+|Temp|Pressure||Volume||Density||Enthalpy|||Entropy|Temp|
 |°C|[kPa]|[m³ Liquid v<sub>f</sub>|/kg] Vapour v<sub>g</sub>|[kg/m³ Liquid d<sub>f</sub>|] Vapour d<sub>g</sub>|Liquid H<sub>f</sub>|[kJ/kg] Latent H<sub>fg</sub>|Vapour H<sub>g</sub>|Liquid S<sub>f</sub>|[kJ/K-kg] Vapour S<sub>g</sub>|°C|
 
-|-100|1.2|0.0006|10.0000|1679.0|0.100|113.3|192.8|306.1|0.6077|1.7210|-100|
+| | | | | | | | | | | | |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+|-100|1.2|0.0006|10.0000|1679.0|0.100|113.3|192.8|306.1|0.6077|1.7210|-100|
 |-99|1.3|0.0006|9.1670|1677.0|0.109|114.1|192.4|306.5|0.6124|1.7170|-99|
 |-98|1.4|0.0006|8.4100|1674.0|0.119|115.0|192.0|307.0|0.6171|1.7130|-98|
 |-97|1.6|0.0006|7.7250|1671.0|0.129|115.8|191.6|307.4|0.6218|1.7100|-97|

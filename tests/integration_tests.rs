@@ -7806,7 +7806,7 @@ BT /F1 12 Tf 330 660 Td (2.25) Tj ET";
     .remove(0);
     assert_eq!(
         from_display.text,
-        "|Name|Qty|Price|\n|---|---|---|\n|Apple|3|1.50|\n|Pear|5|2.25|\n"
+        "| | | |\n|---|---|---|\n|Name|Qty|Price|\n|Apple|3|1.50|\n|Pear|5|2.25|\n"
     );
     assert_eq!(from_display.text, from_sheet.text);
     assert!(!from_display.needs_ocr);

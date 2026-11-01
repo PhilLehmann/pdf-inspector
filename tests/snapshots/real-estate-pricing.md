@@ -40,16 +40,18 @@ REVIEW 8 5
 
 -800
 
-|1982|1986|1990|1998|2006|
+| | | | | |
 |---|---|---|---|---|
+|1982|1986|1990|1998|2006|
 ||Apartment|Industrial|Office-CBD|Retail|
 
 1982 1986 1990 1994 1998 2002 2006
 
 **Table II:** Correlationsofspreadsbypropertytype **Correlation of Cap Rate Spreads Over Treasury** **Multifamily Industrial CBD Office**
 
-||Multifamily|Industrial|CBD Office|
+| | | | |
 |---|---|---|---|
+||Multifamily|Industrial|CBD Office|
 |Industrial|0.937|||
 |CBDOffice|0.924|||
 |Retail|0.922|0.969|0.964|
