@@ -81,7 +81,7 @@ pub fn table_to_markdown(table: &Table) -> String {
     if !footnotes.is_empty() {
         output.push('\n');
         for footnote in footnotes {
-            output.push_str(&footnote);
+            output.push_str(footnote);
             output.push('\n');
         }
     }
