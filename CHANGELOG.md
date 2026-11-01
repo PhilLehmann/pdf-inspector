@@ -17,6 +17,14 @@ version and date. Earlier releases are described in their
 
 ### Fixed
 
+- A table's GFM header row now follows `Table::header_rows` instead of
+  assuming row 0. A tagged header below a title row becomes the Markdown
+  header, rows above it stay outside the table, and a table whose model
+  reports no header is rendered with an empty GFM header rather than a
+  fabricated one.
+- A table whose structure tree declares a header row no longer receives a
+  second, geometry-synthesized header row when it also has a ragged row and
+  text above it.
 - A TrueType subset with no `cmap`, no glyph names and no ToUnicode that
   comes from a core Windows font (Arial, Times New Roman, Verdana, ...) is
   read through the Windows variant of the standard glyph order. That

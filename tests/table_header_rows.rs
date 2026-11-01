@@ -16,6 +16,10 @@ use pdf_inspector::{process_pdf_mem, PdfProcessResult};
 enum TableTags {
     /// Every header cell is a `/TH`.
     Th,
+    /// Row 0 is an ordinary title row and row 1 is tagged as `/TH`; a
+    /// caption sits above the table and the body has a ragged row, so the
+    /// old row-0-majority guard would have synthesized a second header.
+    ThAfterTitle,
     /// The header row is a `/THead` group of `/TD` cells.
     THead,
     /// The table has a structure tree but no header cell at all; the header
@@ -35,14 +39,22 @@ struct Cell {
     y: f32,
 }
 
-fn tagged_cells() -> Vec<Cell> {
+fn tagged_cells(tags: TableTags) -> Vec<Cell> {
     // The third cell of the last row is absent, so the tagged table has a
     // ragged row. Header recovery only runs for a ragged table.
-    let rows: [[&str; 3]; 3] = [
-        ["Name", "Age", "City"],
-        ["Alice", "30", "Berlin"],
-        ["Bob", "25", ""],
-    ];
+    let rows: [[&str; 3]; 3] = if tags == TableTags::ThAfterTitle {
+        [
+            ["Report title", "on two lines", "continued"],
+            ["Name", "Age", "City"],
+            ["Alice", "30", ""],
+        ]
+    } else {
+        [
+            ["Name", "Age", "City"],
+            ["Alice", "30", "Berlin"],
+            ["Bob", "25", ""],
+        ]
+    };
     let mut cells = Vec::new();
     for (row, values) in rows.iter().enumerate() {
         for (column, text) in values.iter().enumerate() {
@@ -93,11 +105,16 @@ fn build_pdf(tags: TableTags) -> Vec<u8> {
     let cells = if untagged {
         geometry_cells()
     } else {
-        tagged_cells()
+        tagged_cells(tags)
     };
     let mut content = String::new();
     // The unclaimed header text above the table, for the recovery case. It
     // carries no marked content, so it is not part of the structure tree.
+    // `ThAfterTitle` carries a caption there instead: the document already
+    // declares row 1, so recovery must not claim it.
+    if tags == TableTags::ThAfterTitle {
+        content.push_str("BT /F1 10 Tf 1 0 0 1 72 712 Tm (Table 5-7: Summary) Tj ET\n");
+    }
     if tags == TableTags::UntaggedHeaderRow {
         for (index, text) in HEADER.iter().enumerate() {
             content.push_str(&format!(
@@ -160,7 +177,9 @@ fn build_pdf(tags: TableTags) -> Vec<u8> {
         for row in 0..3 {
             let mut cells_for_row = Vec::new();
             for column in 0..3 {
-                let role = if tags == TableTags::Th && row == 0 {
+                let role = if (tags == TableTags::Th && row == 0)
+                    || (tags == TableTags::ThAfterTitle && row == 1)
+                {
                     "TH"
                 } else {
                     "TD"
@@ -239,6 +258,41 @@ fn a_tagged_table_reports_which_rows_are_header_rows() {
         }]
     );
     assert_eq!(result.tables[0].table.cells[0], vec!["Name", "Age", "City"]);
+    let markdown = result.markdown.expect("the table is rendered");
+    assert!(
+        markdown.contains("|Name|Age|City|\n|---|---|---|"),
+        "{markdown}"
+    );
+}
+
+#[test]
+fn a_tagged_header_after_a_title_is_the_markdown_header() {
+    // Row 0 is a title, row 1 the document's header. The model reports row 1;
+    // the Markdown must not declare row 0, and the caption above the table
+    // must not become a synthesized header beside the tagged one.
+    let result = result(&build_pdf(TableTags::ThAfterTitle));
+    assert_eq!(result.tables.len(), 1);
+    assert_eq!(
+        result.tables[0].table.header_rows,
+        vec![TableHeaderRow {
+            row: 1,
+            source: TableHeaderSource::Tagged,
+        }]
+    );
+    assert_eq!(
+        result.tables[0].table.cells[0],
+        vec!["Report title", "on two lines", "continued"]
+    );
+    let markdown = result.markdown.expect("the table is rendered");
+    assert!(
+        markdown
+            .contains("|Report title|on two lines|continued|\n\n|Name|Age|City|\n|---|---|---|"),
+        "{markdown}"
+    );
+    assert!(
+        !markdown.contains("|Table 5-7: Summary|\n|---"),
+        "the caption became a header: {markdown}"
+    );
 }
 
 #[test]
@@ -251,6 +305,11 @@ fn a_thead_row_is_a_tagged_header_row() {
             row: 0,
             source: TableHeaderSource::Tagged,
         }]
+    );
+    let markdown = result.markdown.expect("the table is rendered");
+    assert!(
+        markdown.contains("|Name|Age|City|\n|---|---|---|"),
+        "{markdown}"
     );
 }
 
@@ -267,6 +326,11 @@ fn a_synthesized_header_is_marked_synthesized() {
     );
     // The recovered header row is the page's own text above the table.
     assert_eq!(result.tables[0].table.cells[0], HEADER);
+    let markdown = result.markdown.expect("the table is rendered");
+    assert!(
+        markdown.contains("|Region|Sales|Total|\n|---|---|---|"),
+        "{markdown}"
+    );
 }
 
 #[test]
@@ -293,4 +357,16 @@ fn an_untagged_table_reports_no_header_rows() {
         );
     }
     assert!(header_rows(&result).is_empty());
+
+    // The GFM header is empty, and no body row was moved above it: row 0
+    // stays a data row instead of being claimed as the header.
+    let markdown = result.markdown.expect("the table is rendered");
+    assert!(
+        markdown.contains("| | | | |\n|---|---|---|---|"),
+        "no empty GFM header: {markdown}"
+    );
+    assert!(
+        !markdown.contains("|11|12|13|14|\n|---"),
+        "row 0 was presented as the header: {markdown}"
+    );
 }

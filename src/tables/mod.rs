@@ -1542,8 +1542,8 @@ pub enum TableHeaderSource {
     /// The document's tagged structure declares the row a header: a `/TH`
     /// cell, or a cell of a row inside a `/THead` element.
     Tagged,
-    /// The row was recovered from text above a tagged table whose first row
-    /// carries no header cell (`recover_unclaimed_header_row`). It is
+    /// The row was recovered from text above a table whose structure
+    /// declares no header row (`recover_unclaimed_header_row`). It is
     /// evidence about the page, not a declaration by the document.
     Synthesized,
 }
@@ -1573,7 +1573,9 @@ pub struct Table {
     /// Header rows in ascending row order, each with its source. Empty when
     /// the document's tagged structure declares no header and no row was
     /// recovered from geometry; this is the only representation of "no
-    /// header" — row 0 is never assumed to be one.
+    /// header" — row 0 is never assumed to be one. The Markdown renderer
+    /// places its GFM delimiter after the first reported row, or after an
+    /// empty header when this list is empty.
     pub header_rows: Vec<TableHeaderRow>,
 }
 
@@ -1773,13 +1775,16 @@ mod tests {
             ],
             item_indices: vec![],
             kind: TableKind::Data,
-            header_rows: Vec::new(),
+            header_rows: vec![TableHeaderRow {
+                row: 0,
+                source: TableHeaderSource::Tagged,
+            }],
         };
 
-        let md = table_to_markdown(&table);
-        assert!(md.contains("|Header 1|"));
-        assert!(md.contains("|---|"));
-        assert!(md.contains("|Cell 1|"));
+        assert_eq!(
+            table_to_markdown(&table),
+            "|Header 1|Header 2|\n|---|---|\n|Cell 1|Cell 2|\n"
+        );
     }
 
     #[test]
@@ -1887,7 +1892,10 @@ mod tests {
         let table = try_build_key_value_table_from_rows(&items, 1).unwrap();
         let md = table_to_markdown(&table);
 
-        assert!(md.starts_with("|Media|Options|"), "{md}");
+        // No tagged header, so the builder's row 0 is data and the GFM
+        // header is empty.
+        assert!(md.starts_with("| | |\n|---|---|\n"), "{md}");
+        assert!(md.contains("|Media|Options|"), "{md}");
         assert!(
             md.contains("|BACnet/IP (Annex J)|Register as Foreign Device|"),
             "{md}"
@@ -2146,7 +2154,8 @@ mod tests {
         let table = try_build_key_value_table_from_rows(&items, 1).unwrap();
         let md = table_to_markdown(&table);
 
-        assert!(md.starts_with("|Field|Value|"), "{md}");
+        assert!(md.starts_with("| | |\n|---|---|\n"), "{md}");
+        assert!(md.contains("|Field|Value|"), "{md}");
         assert!(md.contains("|<S>|<C>|"), "{md}");
         assert!(md.contains("|<FISCAL-YEAR-END>|DEC-31-2000|"), "{md}");
         assert!(md.contains("|<CASH>|214|"), "{md}");

@@ -2,6 +2,16 @@
 
 use super::{Table, TableKind};
 
+/// Render a table as a GFM table whose header row is the model's.
+///
+/// The header is the first row in [`Table::header_rows`] that survives cell
+/// cleanup. A row before it is printed as a plain pipe row above the table,
+/// separated by a blank line, so the Markdown header is never a row the model
+/// does not report. GFM requires a header row, so a table whose model reports
+/// none is printed with an empty header: the delimiter follows an empty row
+/// instead of making row 0 a header. When the model reports several header
+/// rows, GFM's single header is the first; the remaining tagged rows stay
+/// body rows in the printed table and keep their role in the model.
 pub fn table_to_markdown(table: &Table) -> String {
     if table.cells.is_empty() || table.cells[0].is_empty() {
         return String::new();
@@ -18,7 +28,9 @@ pub fn table_to_markdown(table: &Table) -> String {
     }
 
     // Clean up the table: merge continuation rows, extract footnotes, remove empty rows
-    let (cleaned_cells, footnotes) = clean_table_cells(&table.cells);
+    let cleaned = clean_table_cells_with_rows(&table.cells);
+    let cleaned_cells = &cleaned.cells;
+    let footnotes = &cleaned.footnotes;
 
     if cleaned_cells.is_empty() {
         return String::new();
@@ -27,23 +39,41 @@ pub fn table_to_markdown(table: &Table) -> String {
     let num_cols = cleaned_cells[0].len();
     let mut output = String::new();
 
+    // The first declared or recovered header row, mapped onto the rows that
+    // survived cleanup. `header_rows` indexes `table.cells`; cleanup can drop
+    // a row or fold a continuation into its predecessor, so the printed index
+    // is looked up rather than reused.
+    let header_row = table
+        .header_rows
+        .iter()
+        .filter_map(|header| cleaned.row_map.get(header.row).copied().flatten())
+        .min();
+
     // Compact format: no padding, minimal separators. Optimized for token
     // efficiency — AI agents are the primary consumer, not human eyes.
-    for (row_idx, row) in cleaned_cells.iter().enumerate() {
-        output.push('|');
-        for cell in row.iter() {
-            output.push_str(cell);
-            output.push('|');
-        }
-        output.push('\n');
-
-        // Add separator after header row
-        if row_idx == 0 {
-            output.push('|');
-            for _ in 0..num_cols {
-                output.push_str("---|");
+    match header_row {
+        None => {
+            // No row is a header: an empty GFM header claims no cell as one.
+            let empty_header = vec![String::new(); num_cols];
+            push_row(&mut output, &empty_header);
+            push_delimiter(&mut output, num_cols);
+            for row in cleaned_cells {
+                push_row(&mut output, row);
             }
-            output.push('\n');
+        }
+        Some(header_row) => {
+            // Rows above the declared header are not part of the table.
+            for row in &cleaned_cells[..header_row] {
+                push_row(&mut output, row);
+            }
+            if header_row > 0 {
+                output.push('\n');
+            }
+            push_row(&mut output, &cleaned_cells[header_row]);
+            push_delimiter(&mut output, num_cols);
+            for row in &cleaned_cells[header_row + 1..] {
+                push_row(&mut output, row);
+            }
         }
     }
 
@@ -57,6 +87,25 @@ pub fn table_to_markdown(table: &Table) -> String {
     }
 
     output
+}
+
+/// Append one compact GFM row: every cell between pipes, no padding.
+fn push_row(output: &mut String, row: &[String]) {
+    output.push('|');
+    for cell in row {
+        output.push_str(cell);
+        output.push('|');
+    }
+    output.push('\n');
+}
+
+/// Append the GFM delimiter row for `num_cols` columns.
+fn push_delimiter(output: &mut String, num_cols: usize) {
+    output.push('|');
+    for _ in 0..num_cols {
+        output.push_str("---|");
+    }
+    output.push('\n');
 }
 
 /// True when a detected data table survives formatting cleanup with a header,
@@ -291,12 +340,29 @@ fn ends_like_incomplete_phrase(cell: &str) -> bool {
         || lower.ends_with('/')
 }
 
+/// Rows the formatter prints after cleanup, and where each input row went.
+struct CleanedCells {
+    cells: Vec<Vec<String>>,
+    footnotes: Vec<String>,
+    /// For every input row, the printed row it became. `None` when the row
+    /// was dropped as empty or folded into a footnote; a continuation row
+    /// keeps the printed row it was merged into.
+    row_map: Vec<Option<usize>>,
+}
+
 /// Clean up table cells: merge continuation rows, extract footnotes, remove empty rows
 fn clean_table_cells(cells: &[Vec<String>]) -> (Vec<Vec<String>>, Vec<String>) {
+    let cleaned = clean_table_cells_with_rows(cells);
+    (cleaned.cells, cleaned.footnotes)
+}
+
+fn clean_table_cells_with_rows(cells: &[Vec<String>]) -> CleanedCells {
     let mut cleaned: Vec<Vec<String>> = Vec::new();
     let mut footnotes: Vec<String> = Vec::new();
+    let mut row_map: Vec<Option<usize>> = Vec::with_capacity(cells.len());
 
-    for row in cells {
+    for (row_index, row) in cells.iter().enumerate() {
+        row_map.push(None);
         // Check if this row is empty
         if row.iter().all(|c| c.trim().is_empty()) {
             continue;
@@ -465,6 +531,7 @@ fn clean_table_cells(cells: &[Vec<String>]) -> (Vec<Vec<String>>, Vec<String>) {
 
         if is_continuation {
             // Merge with previous row
+            row_map[row_index] = Some(cleaned.len().saturating_sub(1));
             if let Some(prev_row) = cleaned.last_mut() {
                 for (col_idx, cell) in row.iter().enumerate() {
                     let cell_text = cell.trim();
@@ -479,10 +546,15 @@ fn clean_table_cells(cells: &[Vec<String>]) -> (Vec<Vec<String>>, Vec<String>) {
         } else {
             // Regular row - add as new row
             cleaned.push(row.iter().map(|c| c.trim().to_string()).collect());
+            row_map[row_index] = Some(cleaned.len() - 1);
         }
     }
 
-    (cleaned, footnotes)
+    CleanedCells {
+        cells: cleaned,
+        footnotes,
+        row_map,
+    }
 }
 
 /// Check if a cell value indicates a footnote row
@@ -533,6 +605,7 @@ fn is_footnote_row(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables::{TableHeaderRow, TableHeaderSource};
 
     // --- is_footnote_row ---
 
@@ -925,17 +998,46 @@ mod tests {
             ],
             item_indices: vec![],
             kind: TableKind::Data,
-            header_rows: Vec::new(),
+            header_rows: vec![TableHeaderRow {
+                row: 0,
+                source: TableHeaderSource::Tagged,
+            }],
         };
-        let md = table_to_markdown(&table);
-        assert!(md.contains("|Name|"));
-        assert!(md.contains("|---|"));
-        assert!(md.contains("|Alice|"));
-        assert!(md.contains("|Bob|"));
+        assert_eq!(
+            table_to_markdown(&table),
+            "|Name|Age|\n|---|---|\n|Alice|30|\n|Bob|25|\n"
+        );
+    }
+
+    #[test]
+    fn test_table_to_markdown_tagged_header_after_title() {
+        // Row 0 is a title, row 1 the document's header. The delimiter must
+        // follow row 1 and row 0 must stay outside the GFM table.
+        let table = Table {
+            columns: vec![100.0, 200.0],
+            rows: vec![500.0, 480.0, 460.0],
+            cells: vec![
+                vec!["Report title".into(), "continued".into()],
+                vec!["Name".into(), "Age".into()],
+                vec!["Alice".into(), "30".into()],
+            ],
+            item_indices: vec![],
+            kind: TableKind::Data,
+            header_rows: vec![TableHeaderRow {
+                row: 1,
+                source: TableHeaderSource::Tagged,
+            }],
+        };
+        assert_eq!(
+            table_to_markdown(&table),
+            "|Report title|continued|\n\n|Name|Age|\n|---|---|\n|Alice|30|\n"
+        );
     }
 
     #[test]
     fn test_table_to_markdown_single_row() {
+        // A table with no header rows must not turn its only row into a
+        // header: the GFM header is empty and the row is data.
         let table = Table {
             columns: vec![100.0],
             rows: vec![500.0],
@@ -944,9 +1046,28 @@ mod tests {
             kind: TableKind::Data,
             header_rows: Vec::new(),
         };
-        let md = table_to_markdown(&table);
-        assert!(md.contains("|Only|"));
-        assert!(md.contains("|---|"));
+        assert_eq!(table_to_markdown(&table), "| | |\n|---|---|\n|Only|Row|\n");
+    }
+
+    #[test]
+    fn test_table_to_markdown_without_header_rows() {
+        // The model reports no header: the renderer says so with an empty
+        // GFM header instead of claiming row 0.
+        let table = Table {
+            columns: vec![100.0, 200.0],
+            rows: vec![500.0, 480.0],
+            cells: vec![
+                vec!["Alice".into(), "30".into()],
+                vec!["Bob".into(), "25".into()],
+            ],
+            item_indices: vec![],
+            kind: TableKind::Data,
+            header_rows: Vec::new(),
+        };
+        assert_eq!(
+            table_to_markdown(&table),
+            "| | |\n|---|---|\n|Alice|30|\n|Bob|25|\n"
+        );
     }
 
     #[test]

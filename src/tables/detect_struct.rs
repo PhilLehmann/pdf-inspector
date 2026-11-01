@@ -535,10 +535,6 @@ pub fn detect_tables_from_struct_tree(
             .filter(|(_, row)| row.cells.iter().any(|cell| cell.is_header))
             .map(|(index, _)| index)
             .collect();
-        let first_row_has_tagged_header = page_rows.first().is_some_and(|row| {
-            let header_cells = row.cells.iter().filter(|cell| cell.is_header).count();
-            header_cells * 2 >= row.cells.len()
-        });
         let fallback_col_positions =
             legacy_column_positions(&page_rows, &mcid_to_items, items, page, num_cols);
         let (legacy_cells, legacy_row_positions, mut legacy_item_indices) =
@@ -566,10 +562,13 @@ pub fn detect_tables_from_struct_tree(
         );
         let item_count_before_header = aligned_table.item_indices.len();
         let row_count_before_header = aligned_table.cells.len();
+        // A tagged header exists already: the document declared a header
+        // wherever its header cells are, so geometry must not invent a second
+        // one. Recovery is for tables with no declaration at all.
         recover_unclaimed_header_row(
             &mut aligned_table,
             items,
-            has_ragged_rows && !first_row_has_tagged_header,
+            has_ragged_rows && tagged_header_rows.is_empty(),
         );
 
         let synthesized_header = aligned_table.cells.len() > row_count_before_header;
@@ -581,15 +580,13 @@ pub fn detect_tables_from_struct_tree(
         } else {
             legacy_table
         };
-        // The recovered row is prepended at index 0 and is always the
-        // synthesized one; every tagged row keeps its order below it. A
-        // consumer can therefore tell the document's declaration from the
-        // geometry recovery by `source`, not by position.
-        let shift = usize::from(synthesized_header);
+        // Recovery is gated on `tagged_header_rows.is_empty()`, so a
+        // synthesized row and tagged rows never coexist: a tagged index is
+        // already the row the formatter and consumers see.
         chosen.header_rows = tagged_header_rows
             .into_iter()
             .map(|row| TableHeaderRow {
-                row: row + shift,
+                row,
                 source: TableHeaderSource::Tagged,
             })
             .collect();
@@ -1173,6 +1170,71 @@ mod tests {
                 row: 1,
                 source: TableHeaderSource::Tagged,
             }]
+        );
+    }
+
+    #[test]
+    fn does_not_synthesize_a_header_beside_a_tagged_one() {
+        // The shape the old row-0-majority guard let through: a caption
+        // above the table, an ordinary title row 0, a tagged header row 1
+        // and a ragged body row. Recovery must not prepend a synthesized row
+        // while the document itself declares a header.
+        let items = vec![
+            make_item("Table 5-7: Summary of responses", 50.0, 720.0, 1, None),
+            make_item("Report title", 50.0, 700.0, 1, Some(10)),
+            make_item("on two lines", 200.0, 700.0, 1, Some(11)),
+            make_item("continued", 350.0, 700.0, 1, Some(12)),
+            make_item("Name", 50.0, 680.0, 1, Some(20)),
+            make_item("Age", 200.0, 680.0, 1, Some(21)),
+            make_item("City", 350.0, 680.0, 1, Some(22)),
+            make_item("Alice", 50.0, 660.0, 1, Some(30)),
+            make_item("30", 200.0, 660.0, 1, Some(31)),
+        ];
+        let cell = |is_header: bool, mcids: Vec<(i64, u32)>| StructTableCell { is_header, mcids };
+        let struct_tables = vec![StructTable {
+            rows: vec![
+                StructTableRow {
+                    cells: vec![
+                        cell(false, vec![(10, 1)]),
+                        cell(false, vec![(11, 1)]),
+                        cell(false, vec![(12, 1)]),
+                    ],
+                },
+                StructTableRow {
+                    cells: vec![
+                        cell(true, vec![(20, 1)]),
+                        cell(true, vec![(21, 1)]),
+                        cell(true, vec![(22, 1)]),
+                    ],
+                },
+                StructTableRow {
+                    cells: vec![
+                        cell(false, vec![(30, 1)]),
+                        cell(false, vec![(31, 1)]),
+                        // Ragged: this cell has no marked content.
+                        cell(false, Vec::new()),
+                    ],
+                },
+            ],
+        }];
+
+        let tables = detect_tables_from_struct_tree(&items, &struct_tables, 1);
+        assert_eq!(tables.len(), 1);
+        let table = &tables[0];
+        assert_eq!(
+            table.cells[0],
+            vec!["Report title", "on two lines", "continued"]
+        );
+        assert_eq!(
+            table.header_rows,
+            vec![TableHeaderRow {
+                row: 1,
+                source: TableHeaderSource::Tagged,
+            }]
+        );
+        assert!(
+            !table.item_indices.contains(&0),
+            "caption must stay outside"
         );
     }
 
