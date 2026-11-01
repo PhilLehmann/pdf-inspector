@@ -113,7 +113,13 @@ fn build_pdf(tags: TableTags) -> Vec<u8> {
     // `ThAfterTitle` carries a caption there instead: the document already
     // declares row 1, so recovery must not claim it.
     if tags == TableTags::ThAfterTitle {
-        content.push_str("BT /F1 10 Tf 1 0 0 1 72 712 Tm (Table 5-7: Summary) Tj ET\n");
+        for (text, x) in [
+            ("Table 5-7: Summary", 72.0),
+            ("of responses", 200.0),
+            ("2026", 330.0),
+        ] {
+            content.push_str(&format!("BT /F1 10 Tf 1 0 0 1 {x} 712 Tm ({text}) Tj ET\n"));
+        }
     }
     if tags == TableTags::UntaggedHeaderRow {
         for (index, text) in HEADER.iter().enumerate() {

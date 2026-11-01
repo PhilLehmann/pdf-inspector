@@ -1180,7 +1180,9 @@ mod tests {
         // and a ragged body row. Recovery must not prepend a synthesized row
         // while the document itself declares a header.
         let items = vec![
-            make_item("Table 5-7: Summary of responses", 50.0, 720.0, 1, None),
+            make_item("Table 5-7: Summary", 50.0, 720.0, 1, None),
+            make_item("of responses", 200.0, 720.0, 1, None),
+            make_item("2026", 350.0, 720.0, 1, None),
             make_item("Report title", 50.0, 700.0, 1, Some(10)),
             make_item("on two lines", 200.0, 700.0, 1, Some(11)),
             make_item("continued", 350.0, 700.0, 1, Some(12)),
